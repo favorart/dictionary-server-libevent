@@ -41,6 +41,7 @@ struct workqueue
 int   wque_init (wque_t *wq, int n_workers);
 void  wque_free (wque_t *wq);
 void  wque_push (wque_t *wq, job_t *job);
+
 //-----------------------------------------
 #define LL_ADD(item, list) { \
 	item->prev = NULL; \

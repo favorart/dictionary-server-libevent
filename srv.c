@@ -1,9 +1,10 @@
 ﻿#include "header.h"
 #include "srv.h"
-
+#include "srv_cache.h"
 
 void  find_words_prefix (struct evbuffer *buf_inc,
-                         struct evbuffer *buf_out);
+                         struct evbuffer *buf_out,
+                         struct hash_table *ht);
 //-----------------------------------------
 void  server_job_function (job_t *job)
 {
@@ -58,6 +59,7 @@ void  srv_accept_cb (evutil_socket_t fd, short ev, void *arg)
     client_free (Client);
     return;
   }
+  Client->ht = server_conf->ht;
   //----------------------------------------------------------------------
   /* Create new bufferized event, linked with client's socket */
   if ( !(Client->b_ev = bufferevent_socket_new (Client->base, SlaveSocket, BEV_OPT_CLOSE_ON_FREE)) )
@@ -138,23 +140,23 @@ void  srv_read_cb  (struct bufferevent *b_ev, void *arg)
   struct evbuffer *buf_out = bufferevent_get_output (b_ev);
 
   /* Copy all the data from the input buffer to the output buffer. */
-  find_words_prefix (buf_in, buf_out);
+  find_words_prefix (buf_in, buf_out, Client->ht);
   //----------------------------------------------------------------------
 #ifdef _DEBUG
   printf ("response ready\n");
 #endif // _DEBUG
 }
 //-----------------------------------------
-#define WORD_LEN 101
-#define WORD_CNT 10
-
 void  find_words_prefix (struct evbuffer *buf_inc,
-                         struct evbuffer *buf_out)
+                         struct evbuffer *buf_out,
+                         struct hash_table *ht)
 {
-  char      words[WORD_CNT][WORD_LEN];
-  size_t  weights[WORD_CNT];
+  // char      words[DICT_WORD_CNT][DICT_WORD_LEN];
+  // size_t  weights[DICT_WORD_CNT];
   char   *prefix = NULL;
   size_t  prefix_length = 0U;
+  //-----------------------------------------------------------------
+  ht_rec rec = { 0 };
   //-----------------------------------------------------------------
   FILE *fdict = fopen (SRV_DICT_FLNAME, "r");
   if ( !fdict )
@@ -165,53 +167,66 @@ void  find_words_prefix (struct evbuffer *buf_inc,
 
   while ( (prefix = evbuffer_readln (buf_inc, &prefix_length, EVBUFFER_EOL_ANY)) )
   {
-    int     i = 0;
-    char    word[WORD_LEN];
+    // int     count = 0;
+    char    word[DICT_WORD_LEN];
     size_t  weight = 0;
 
 #ifdef  _DEBUG
     printf ("\n\n--> %s\n", prefix);
 #endif // _DEBUG
-    //----------------------------------------------------------------------
-    while ( 2 == fscanf (fdict, "%s %d", word, &weight) )
+    //-----------------------------------------------------------------
+    strcpy (rec.key.word, prefix);
+    //-----------------------------------------------------------------
+    if ( hashtable_get (ht, &rec) )
     {
-
-      if ( !strncmp (word, prefix, prefix_length) )
+      // printf ("non hash\n");
+      //----------------------------------------------------------------------
+      while ( 2 == fscanf (fdict, "%s %d", word, &weight) )
       {
-        /* sorted_by weight */
-        if ( i >= WORD_CNT )
+        // #ifdef  _DEBUG
+        //       printf ("%s %d\n", word, weight);
+        // #endif // _DEBUG
+
+        if ( !strncmp (word, prefix, prefix_length) )
         {
-          for ( int j = 0; j < WORD_CNT; ++j )
+          /* sorted_by weight */
+          if ( rec.val.count >= DICT_WORD_CNT )
           {
-            if ( weight > weights[j] )
+            for ( int j = 0; j < DICT_WORD_CNT; ++j )
             {
-              strcpy (words[j], word);
-              weights[j] = weight;
-              break;
+              if ( weight > rec.val.weights[j] )
+              {
+                strcpy (rec.val.words[j], word);
+                rec.val.weights[j] = weight;
+                break;
+              }
             }
           }
+          else
+          {
+            strcpy (rec.val.words[rec.val.count], word);
+            rec.val.weights[rec.val.count] = weight;
+            ++rec.val.count;
+          } // else
         }
-        else
-        {
-          strcpy (words[i], word);
-          weights[i] = weight;
-          ++i;
-        } // else
+      }
+      //-----------------------------------------------------------------
+    }
+
+    if ( buf_out )
+    {
+      for ( int j = 0; j < rec.val.count; ++j )
+      {
+#ifdef    _DEBUG
+        printf ("%s %d\n", rec.val.words[j], rec.val.weights[j]);
+#endif // _DEBUG
+        evbuffer_add_printf (buf_out, "%s\n", rec.val.words[j]);
       }
     }
     //-----------------------------------------------------------------
-    if ( buf_out )
-    {
-      for ( int j = 0; j < i; ++j )
-      {
-#ifdef  _DEBUG
-        printf ("%s %d\n", words[j], weights[j]);
-#endif // _DEBUG
-
-        evbuffer_add_printf (buf_out, "%s\n", words[j]);
-      }
-    }
-
+    rec.ttl = ttl_converted (10);
+    hashtable_set (ht, &rec);
+    //-----------------------------------------------------------------
     free (prefix);
     continue;
 
@@ -223,8 +238,53 @@ REQ_ERR:;
   //-----------------------------------------------------------------
 HNDL_FREE:;
   free (prefix);
-  fclose (fdict);
+  if ( fdict )
+    fclose (fdict);
+
   evbuffer_drain (buf_inc, -1);
   //----------------------------------------------------------------------
 }
 //-----------------------------------------
+#ifdef  _TEST
+#define _TEST
+int main ()
+{
+  int i = 0;
+  hashtable ht = { 0 };
+
+  hashtable_init (&ht, DICT_CACHELNS, 0, my_key_comp);;
+  ht_rec rec = { 0 };
+
+  rec.ttl = ttl_converted (3);
+  strcpy (rec.key.word, "аббат");
+
+  strcpy (rec.val.words[0], "аббатство"); rec.val.weights[0] = 9;
+  strcpy (rec.val.words[1], "аббат"    ); rec.val.weights[1] = 8;
+  strcpy (rec.val.words[2], "аббатский"); rec.val.weights[2] = 7;
+
+  hashtable_set (&ht, &rec);
+  
+  memset (&rec, 0, sizeof (rec));
+  strcpy (rec.key.word, "аббат");
+
+  hashtable_get (&ht, &rec);
+  printf ("\n%s %lf\n", rec.key.word, difftime (time (NULL), rec.ttl));
+  printf ("%s %d\n", rec.val.words[0], rec.val.weights[0]);
+  printf ("%s %d\n", rec.val.words[1], rec.val.weights[1]);
+  printf ("%s %d\n", rec.val.words[2], rec.val.weights[2]);
+
+  memset (&rec, 0, sizeof (rec));
+  strcpy (rec.key.word, "аббат");
+
+  sleep (3);
+  hashtable_get (&ht, &rec);
+  printf ("\n%s %lf\n", rec.key.word, difftime (time (NULL), rec.ttl));
+  printf ("%s %d\n", rec.val.words[0], rec.val.weights[0]);
+  printf ("%s %d\n", rec.val.words[1], rec.val.weights[1]);
+  printf ("%s %d\n", rec.val.words[2], rec.val.weights[2]);
+  
+  hashtable_free (&ht);
+
+  return 0;
+}
+#endif // _TEST

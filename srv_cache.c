@@ -3,56 +3,59 @@
 #include "srv.h"
 
 //-----------------------------------------
-#define TIME_EPS 0.01
+#define TIME_EPS -0.01
 /* Relative TTL to absolute TTL (in seconds) */
 time_t  ttl_converted (int32_t ttl)
 { return (time (NULL) + ttl); }
 bool    ttl_completed (time_t  ttl)
 { return (difftime (time (NULL), ttl) > TIME_EPS); }
 //-----------------------------------------
-void  hashtable_init (hashtable *ht, size_t lines_count, size_t size)
+void  hashtable_init (hashtable *ht, size_t lines_count, size_t size, int (*key_comp) (ht_key_t *a, ht_key_t *b))
 {
   //------------------------------------------
   ht->lines_count = lines_count;
   if ( sizeof (ht_line) * lines_count > size )
-  { perror ("ht size");
+  { my_errno = SRV_ERR_PARAM;
+    fprintf (stderr, "ht size%s", strmyerror ());
     ht->shm_size = lines_count * sizeof (ht_line);
   }
-  else
-  { ht->shm_size = size; }
+  else { ht->shm_size = size; }
   //-----------------------------------------
-#ifdef _DEBUG
+#ifdef CACHE_STATIC
+  /* Выделение и инициализация общей памяти */
   static char mem[CACHELINES * sizeof (ht_line)] = { 0 };
   ht->shmemory = mem;
-  ht->lines = (ht_line*) ht->shmemory;
-#endif // _DEBUG
-#ifdef _LOCK
-  mysem_val_t val = 1;
-  /* Создание одного семафора, проинициализированного */
-  ht->tb_semid = mysem_create (1U, &val);
 
-  /* Создание общей памяти */
-  ht->tb_shmid = myshm_create (ht->shm_size);
-  ht->shmemory = myshm_append (ht->tb_shmid);
-
+#else // CACHE_STATIC
+  ht->shmemory = malloc (ht->shm_size);
+  if ( !ht->shmemory )
+  { perror ("ht shmemory");
+    exit (EXIT_FAILURE);
+  }  
   /* Инициализация общей памяти */
-  memset (ht->shmemory, 0, shm_size);
-#endif // _LOCK
+  memset (ht->shmemory, 0, ht->shm_size);
+#endif
+
+  ht->lines = (ht_line*) ht->shmemory;
   //-----------------------------------------
+  pthread_mutex_t blank_mutex = PTHREAD_MUTEX_INITIALIZER;
+  memcpy (&ht->mutex, &blank_mutex, sizeof (ht->mutex));
+  //-----------------------------------------
+  ht->key_comp = key_comp;
+
   return;
 }
 void  hashtable_free (hashtable *ht)
 {
-#ifdef _LOCK
-  myshm_remove (ht->tb_shmid);
-  mysem_remove (ht->tb_semid);
-#endif // _LOCK
+#ifndef CACHE_STATIC
+  free (ht->shmemory);
+#endif
 }
 //-----------------------------------------
 static hash_t  hash (ht_key_t key)
 {
   char  *k = (char*) &key;
-  hash_t h = 2139062143;
+  hash_t h = 2139062143U;
 
   for ( int i = 0; i < sizeof (key); ++i )
     h = h * 37 + k[i];
@@ -110,7 +113,7 @@ static hash_t  hashtable_walk (hashtable *ht, ht_rec *data, bool isget)
       ht->lines[h - 1U].busy = false;
       h = hc;
     }
-    else if ( ht->lines[h].data.key == data->key )
+    else if ( !ht->key_comp (&ht->lines[h].data.key, &data->key) )
     {
       h_ret = h;
       break;
@@ -151,27 +154,17 @@ static hash_t  hashtable_walk (hashtable *ht, ht_rec *data, bool isget)
 bool  hashtable_get (hashtable *ht, ht_rec *data)
 {
 #ifdef _LOCK
-  mysem_lock (ht->tb_semid, 0);
+  pthread_mutex_lock (&ht->mutex);
 #endif // _LOCK
   //-----------------------------------------
   hash_t h = hashtable_walk (ht, data, true);
   if ( (h < ht->lines_count) && ht->lines[h].busy
-      && (ht->lines[h].data.key == data->key) )
+      && !ht->key_comp  (&ht->lines[h].data.key, &data->key) )
   { *data = ht->lines[h].data; }
   else { h = ht->lines_count; }
   //-----------------------------------------
-#ifdef _DEBUG_HASH
-  FILE *f = fopen ("output.txt", "at");
-  hashtable_print_debug (ht, f);
-  fclose (f);
-#endif // _DEBUG_HASH
-  //-----------------------------------------
-#ifdef _DEBUG
-  printf ("get he=%d h=%d\n", he, h);
-#endif // _DEBUG
-
 #ifdef _LOCK
-  mysem_unlock (ht->tb_semid, 0);
+  pthread_mutex_unlock (&ht->mutex);
 #endif // _LOCK
   //-----------------------------------------
   return (h == ht->lines_count);
@@ -179,19 +172,19 @@ bool  hashtable_get (hashtable *ht, ht_rec *data)
 bool  hashtable_set (hashtable *ht, ht_rec *data)
 {
 #ifdef _LOCK
-  mysem_lock (ht->tb_semid, 0);
+  pthread_mutex_lock (&ht->mutex);
 #endif // _LOCK
   //-----------------------------------------
   hash_t h = hashtable_walk (ht, data, false);
   if ( (h < ht->lines_count) && (!ht->lines[h].busy
-    || (ht->lines[h].data.key == data->key)) )
+    || !ht->key_comp (&ht->lines[h].data.key, &data->key)) )
   { ht->lines[h].data = *data;
     ht->lines[h].busy = true;
   }
   else h = ht->lines_count;
   //-----------------------------------------
 #ifdef _LOCK
-  mysem_unlock (ht->tb_semid, 0);
+  pthread_mutex_unlock (&ht->mutex);
 #endif // _LOCK
   //-----------------------------------------
   return (h == ht->lines_count);

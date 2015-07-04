@@ -21,6 +21,8 @@
  */
 #ifndef _SRV_DICT_H_
 #define _SRV_DICT_H_
+
+#define _DEBUG
 //-----------------------------------------
 typedef enum
 { SRV_ERR_NONE,  SRV_ERR_PARAM,
@@ -38,6 +40,7 @@ const char*  strmyerror ();
 #define  SRV_DICT_FLNAME   "mydict.txt"
 
 typedef uint8_t wc_t;
+typedef struct hash_table    hashtable;
 typedef struct server_config  srv_conf;
 struct  server_config
 {
@@ -56,6 +59,7 @@ struct  server_config
   wque_t     workqueue;
   //-----------------------
   struct event_base  *base;
+  struct hash_table  *ht;
 };
 extern  struct server_config  server_conf;
 //-----------------------------------------
@@ -75,6 +79,7 @@ struct  client
   struct bufferevent  *b_ev;
   struct event_base   *base;
   //---------------------------
+  struct hash_table   *ht;
 };
 void    client_free (struct client *Client);
 //-----------------------------------------
@@ -83,5 +88,21 @@ void    srv_ac_err_cb (evutil_socket_t fd, short ev, void *arg);
 //-----------------------------------------
 void    srv_read_cb  (struct bufferevent *b_ev, void *arg);
 void    srv_error_cb (struct bufferevent *b_ev, short events, void *arg);
+//-----------------------------------------
+#define DICT_CACHELNS 256
+#define DICT_WORD_LEN 101
+#define DICT_WORD_CNT 10
+struct dict_rec
+{ char   words[DICT_WORD_CNT][DICT_WORD_LEN];
+  int  weights[DICT_WORD_CNT];
+  int  count;
+};
+struct  key_rec
+{ char word[DICT_WORD_LEN]; };
+
+typedef struct dict_rec ht_val_t;
+typedef struct  key_rec ht_key_t;
+static inline int  my_key_comp (ht_key_t *a, ht_key_t* b)
+{ return strcmp (a->word, b->word); }
 //-----------------------------------------
 #endif // _SRV_DICT_H_

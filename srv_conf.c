@@ -1,6 +1,6 @@
 ﻿#include "header.h"
 #include "srv.h"
-
+#include "srv_cache.h"
 //-----------------------------------------
 const char*  strmyerror ()
 {
@@ -8,12 +8,12 @@ const char*  strmyerror ()
   switch ( my_errno )
   {
     default:            strerr = NULL;                         break;
-    case SRV_ERR_PARAM: strerr = "Invalid function argument."; break;
-    case SRV_ERR_INPUT: strerr = "Input incorrect user data."; break;
-    case SRV_ERR_LIBEV: strerr = "Incorrect libevent entity."; break;
-    case SRV_ERR_RCMMN: strerr = "Incorrect request command."; break;
-    case SRV_ERR_RFREE: strerr = "Dispatched a free request."; break;
-    case SRV_ERR_FDTRS: strerr = "Failure in transmiting fd."; break;
+    case SRV_ERR_PARAM: strerr = " : Invalid function argument."; break;
+    case SRV_ERR_INPUT: strerr = " : Input incorrect user data."; break;
+    case SRV_ERR_LIBEV: strerr = " : Incorrect libevent entity."; break;
+    case SRV_ERR_RCMMN: strerr = " : Incorrect request command."; break;
+    case SRV_ERR_RFREE: strerr = " : Dispatched a free request."; break;
+    case SRV_ERR_FDTRS: strerr = " : Failure in transmiting fd."; break;
   }
   my_errno = SRV_ERR_NONE;
   return strerr;
@@ -73,11 +73,16 @@ int   server_config_init  (srv_conf *conf, char *port, char *ip, char *work)
   }
   //-----------------------
   if ( wque_init (&conf->workqueue, conf->workers_count) )
-  {
-    perror ("workqueue init");
+  { perror ("work queue init");
     exit (EXIT_FAILURE);
   }
 
+  if ( !(conf->ht = malloc (sizeof (*conf->ht))) )
+  { perror ("ht malloc");
+    exit (EXIT_FAILURE);
+  }
+
+  hashtable_init (conf->ht, DICT_CACHELNS, 0, my_key_comp);
   //-----------------------
 CONF_FREE:;
   if ( fail )
@@ -93,6 +98,9 @@ void  server_config_print (srv_conf *conf, FILE *stream)
 }
 void  server_config_free  (srv_conf *conf)
 {
+  //-----------------------
+  hashtable_free (conf->ht);
+  free (conf->ht);
   //-----------------------
   wque_free (&conf->workqueue);
   //-----------------------
